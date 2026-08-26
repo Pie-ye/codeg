@@ -1,8 +1,8 @@
 # Codeg
 
-[![Release](https://img.shields.io/github/v/release/xintaofei/codeg)](https://github.com/xintaofei/codeg/releases)
+[![Release](https://img.shields.io/github/v/release/Pie-ye/codeg)](https://github.com/Pie-ye/codeg/releases)
 [![Docs](https://img.shields.io/badge/docs-docs.codeg.app-3451b2)](https://docs.codeg.app)
-[![License](https://img.shields.io/github/license/xintaofei/codeg)](./LICENSE)
+[![License](https://img.shields.io/github/license/Pie-ye/codeg)](./LICENSE)
 
 <p>
   <strong>English</strong> |
@@ -147,26 +147,26 @@ Step away from your desk, not your work. The native iOS and Android clients conn
 
 ## 📦 Install & Run
 
-**Desktop** — download the installer for macOS, Windows, or Linux from [Releases](https://github.com/xintaofei/codeg/releases), then follow [Installation](https://docs.codeg.app/getting-started/installation).
+**Desktop** — download the installer for macOS, Windows, or Linux from [Releases](https://github.com/Pie-ye/codeg/releases), then follow [Installation](https://docs.codeg.app/getting-started/installation).
 
 **Server** — run Codeg headless and reach it from any browser. On Linux or macOS:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/xintaofei/codeg/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Pie-ye/codeg/main/install.sh | bash
 CODEG_STATIC_DIR=/usr/local/share/codeg/web codeg-server
 ```
 
 On Windows, in PowerShell:
 
 ```powershell
-irm https://raw.githubusercontent.com/xintaofei/codeg/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/Pie-ye/codeg/main/install.ps1 | iex
 $env:CODEG_STATIC_DIR="$env:LOCALAPPDATA\codeg\web"; codeg-server
 ```
 
 **Docker** — the same server, in one container:
 
 ```bash
-docker run -d -p 3080:3080 -v codeg-data:/data ghcr.io/xintaofei/codeg:latest
+docker run -d -p 3080:3080 -v codeg-data:/data ghcr.io/Pie-ye/codeg:latest
 ```
 
 **Mobile** — install the [iOS app](https://apps.apple.com/app/codeg-client/id6785199071) or the [Android APK](https://github.com/xintaofei/codeg-android/releases/latest), then point it at the **Web Service** of your desktop app or at your own `codeg-server`: URL, token, done. Pairing steps in [Mobile apps](https://docs.codeg.app/getting-started/installation#mobile-apps).

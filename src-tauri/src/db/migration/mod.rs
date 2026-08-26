@@ -38,6 +38,8 @@ mod m20260803_000001_token_usage;
 mod m20260807_000001_work_task_scheduled_at;
 mod m20260808_000001_custom_agent_supports_mcp;
 mod m20260817_000001_work_task_conversation_title;
+mod m20260818_000001_work_task_source;
+mod m20260819_000001_work_task_completion_kind;
 pub struct Migrator;
 
 #[async_trait::async_trait]
@@ -82,6 +84,36 @@ impl MigratorTrait for Migrator {
             Box::new(m20260807_000001_work_task_scheduled_at::Migration),
             Box::new(m20260808_000001_custom_agent_supports_mcp::Migration),
             Box::new(m20260817_000001_work_task_conversation_title::Migration),
+            Box::new(m20260818_000001_work_task_source::Migration),
+            Box::new(m20260819_000001_work_task_completion_kind::Migration),
         ]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use sea_orm_migration::MigratorTrait;
+
+    use super::Migrator;
+
+    #[test]
+    fn registers_work_task_source_and_completion_migrations() {
+        let names: Vec<String> = <Migrator as MigratorTrait>::migrations()
+            .into_iter()
+            .map(|migration| migration.name().to_string())
+            .collect();
+
+        assert!(
+            names
+                .iter()
+                .any(|name| name == "m20260818_000001_work_task_source"),
+            "the applied work-task source migration must remain registered"
+        );
+        assert!(
+            names
+                .iter()
+                .any(|name| name == "m20260819_000001_work_task_completion_kind"),
+            "the applied work-task completion migration must remain registered"
+        );
     }
 }

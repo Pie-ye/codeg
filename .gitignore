@@ -16,6 +16,7 @@ tsconfig.tsbuildinfo
 # Next.js
 .next/
 out/
+out.bak/
 next-env.d.ts
 
 # Monaco editor local files (copied from node_modules)
