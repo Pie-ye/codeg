@@ -3458,6 +3458,51 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn list_connections_surfaces_live_session_status() {
+        // Production reality: `AgentConnection.status` is the construction-time
+        // snapshot (`Connecting`) and is never updated; the authoritative status
+        // lives in `SessionState`, mutated by `emit_with_state` on every
+        // `StatusChanged`/`SessionStarted` event. Regression for
+        // `acp_list_connections` reporting every live connection as
+        // "connecting" forever.
+        let mgr = ConnectionManager::new();
+        let (tx, _rx) = mpsc::channel(1);
+        let mut state = SessionState::new(
+            "c-status".to_string(),
+            crate::models::agent::AgentType::ClaudeCode,
+            None,
+            "test-window".to_string(),
+            None,
+        );
+        state.status = ConnectionStatus::Connected; // live status
+        let conn = AgentConnection {
+            id: "c-status".to_string(),
+            agent_type: crate::models::agent::AgentType::ClaudeCode,
+            status: ConnectionStatus::Connecting, // stale construction-time field
+            owner_window_label: "test-window".to_string(),
+            cmd_tx: tx,
+            state: Arc::new(RwLock::new(state)),
+            emitter: EventEmitter::Noop,
+            prompt_lock: Arc::new(tokio::sync::Mutex::new(())),
+            config_fingerprint: String::new(),
+            last_observed_fingerprint: String::new(),
+            child_pid: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+        };
+        mgr.connections
+            .lock()
+            .await
+            .insert("c-status".to_string(), conn);
+
+        let listed = mgr.list_connections().await;
+        assert_eq!(listed.len(), 1, "one connection listed");
+        assert_eq!(
+            listed[0].status,
+            ConnectionStatus::Connected,
+            "list must report the live session status, not the stale construction-time field"
+        );
+    }
+
     /// Spawn a two-level process tree: `sh` (the stand-in for the agent CLI)
     /// backgrounds a `sleep` grandchild (the stand-in for the agent's own
     /// children — an MCP server, a forked `node`) and records its pid. The

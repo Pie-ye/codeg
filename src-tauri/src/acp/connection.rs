@@ -1008,7 +1008,19 @@ impl AgentConnection {
         ConnectionInfo {
             id: self.id.clone(),
             agent_type: self.agent_type,
-            status: self.status.clone(),
+            // `AgentConnection.status` is only stamped at construction
+            // (`Connecting`) and never updated afterwards; the authoritative
+            // status lives in `SessionState`, which `emit_with_state` mutates
+            // on every `StatusChanged`/`SessionStarted` event. Surface the
+            // live status so API consumers (mobile clients, remote UIs) don't
+            // see every connection as "connecting" forever. If the state lock
+            // is momentarily held by a writer, fall back to the stored field
+            // rather than blocking the connection-map read path.
+            status: self
+                .state
+                .try_read()
+                .map(|s| s.status.clone())
+                .unwrap_or_else(|_| self.status.clone()),
         }
     }
 }
