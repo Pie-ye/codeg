@@ -8,6 +8,8 @@ import type {
   EventStreamSubscription,
 } from "./types"
 
+const WS_HEARTBEAT_INTERVAL_MS = 20_000
+
 /**
  * Wire shape of the server-→-client attach protocol frames. Mirrors
  * `ServerMsg` in `src-tauri/src/web/ws_attach.rs`. Each frame carries the
@@ -75,13 +77,18 @@ interface ActiveSub {
 export class WebEventStream implements EventStream {
   private subs = new Map<string, ActiveSub>()
   private unbindWsReady: (() => void) | null
+  private heartbeatTimer: ReturnType<typeof setInterval> | null = null
 
   constructor(private host: AttachTransportHost) {
     // Re-attach all live subscriptions on every WS-ready transition. On
     // the initial connect this catches up subs that called attach() before
     // the WS opened; on reconnect it carries the running `lastAppliedSeq`
     // so the server can pick replay vs. snapshot.
-    this.unbindWsReady = host.onWsReady(() => this.reattachAll())
+    this.unbindWsReady = host.onWsReady(() => {
+      this.startHeartbeat()
+      this.reattachAll()
+    })
+    if (host.isWsOpen()) this.startHeartbeat()
   }
 
   attach(
@@ -154,6 +161,10 @@ export class WebEventStream implements EventStream {
   destroy(): void {
     this.unbindWsReady?.()
     this.unbindWsReady = null
+    if (this.heartbeatTimer !== null) {
+      clearInterval(this.heartbeatTimer)
+      this.heartbeatTimer = null
+    }
     this.subs.clear()
     // Do NOT send detach frames here — destroy() is called when the
     // transport is going away (logout, remote-workspace switch), so the
@@ -189,6 +200,15 @@ export class WebEventStream implements EventStream {
     for (const subscriptionId of this.subs.keys()) {
       this.sendAttach(subscriptionId)
     }
+  }
+
+  private startHeartbeat(): void {
+    if (this.heartbeatTimer !== null) return
+    this.heartbeatTimer = setInterval(() => {
+      if (this.host.isWsOpen()) {
+        this.host.sendFrame({ action: "ping" })
+      }
+    }, WS_HEARTBEAT_INTERVAL_MS)
   }
 }
 
