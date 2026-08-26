@@ -109,7 +109,28 @@ async fn ws_authenticated_receives_ready_frame() {
 }
 
 // ───────────────────────────────────────────────────────────────────────────
-// 3. Attach to an unknown connection_id detaches with ConnectionGone.
+// 3. Application-level ping receives a pong liveness response.
+// ───────────────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn ws_ping_receives_pong() {
+    let (server, _state, _d, _s) = build_ws_server().await;
+    let mut ws = server
+        .get_websocket("/ws/events")
+        .add_header(SEC_WEBSOCKET_PROTOCOL, ws_auth_protocol(TEST_TOKEN))
+        .await
+        .into_websocket()
+        .await;
+
+    let _ready = next_json(&mut ws).await;
+    ws.send_json(&json!({ "action": "ping" })).await;
+
+    let pong = next_json(&mut ws).await;
+    assert_eq!(pong["type"], "pong");
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// 4. Attach to an unknown connection_id detaches with ConnectionGone.
 // ───────────────────────────────────────────────────────────────────────────
 
 #[tokio::test]
@@ -140,7 +161,7 @@ async fn ws_attach_unknown_connection_detaches() {
 }
 
 // ───────────────────────────────────────────────────────────────────────────
-// 4. Cold attach to a live connection returns snapshot, then live events
+// 5. Cold attach to a live connection returns snapshot, then live events
 //    flow through as `event` frames.
 // ───────────────────────────────────────────────────────────────────────────
 
@@ -209,7 +230,7 @@ async fn ws_cold_attach_receives_snapshot_then_live_events() {
 }
 
 // ───────────────────────────────────────────────────────────────────────────
-// 5. Hot attach with a cursor older than the head returns a replay frame
+// 6. Hot attach with a cursor older than the head returns a replay frame
 //    containing the events the client missed.
 // ───────────────────────────────────────────────────────────────────────────
 
