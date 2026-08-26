@@ -152,13 +152,12 @@ impl AcpAgentMeta {
     /// Having a `registry_version` does not imply it: a binary agent's custom
     /// install works by substituting the requested version into the pinned
     /// download URL (`apply_custom_version_to_url`), which only produces a
-    /// different URL when the pinned version is a substring of it. Antigravity
-    /// is the counter-example — its `version` is the ACP registry's `1.0.0`
-    /// while its URLs carry Google's build id
-    /// (`agy_acp_server_20260818_01_RC01`), so the substitution is a no-op and
-    /// the "install 1.2.3" the user asked for would download the SAME bytes
-    /// and cache them under the new number. That is worse than refusing:
-    /// `installed_version` then reports a build that was never fetched.
+    /// different URL when the pinned version is a substring of it. A URL that
+    /// carries a build id instead of the registry version would make the
+    /// substitution a no-op: the "install 1.2.3" the user asked for would
+    /// download the SAME bytes and cache them under the new number. That is
+    /// worse than refusing: `installed_version` then reports a build that was
+    /// never fetched.
     ///
     /// Judged per-platform, because only the current platform's URL is ever
     /// downloaded and a future agent may template one target but not another.
@@ -179,20 +178,6 @@ impl AcpAgentMeta {
         }
     }
 }
-
-/// Launch args for Google Antigravity's ACP server, resolved at compile time.
-///
-/// The ACP registry publishes `--uid=` for the two Linux targets and for
-/// nothing else, and that asymmetry is deliberate: the flag comes from the
-/// binary's linked-in absl `InitGoogle`, which — when the process runs as root
-/// — drops privileges to `nobody` unless told otherwise. Passing it everywhere
-/// would risk a hard "unknown flag" startup error on the Windows build, which
-/// need not link the same initializer.
-const ANTIGRAVITY_LAUNCH_ARGS: &[&str] = if cfg!(target_os = "linux") {
-    &["--uid="]
-} else {
-    &[]
-};
 
 pub fn current_platform() -> &'static str {
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
@@ -1165,111 +1150,64 @@ pub fn get_agent_meta(agent_type: AgentType) -> AcpAgentMeta {
             agent_type,
             supports_mcp: true,
             name: "Google Antigravity",
-            description: "Google's AI coding agent (first-party ACP server)",
-            // `agy_acp_server` is Google's OWN ACP server, not a community
-            // bridge: the verified handshake advertises `loadSession`,
-            // `sessionCapabilities` list+resume, image/audio/embeddedContext
-            // prompts and MCP http+sse, with `agentInfo.name =
-            // "antigravity-acp"`. Model and session mode (default/auto_edit/
-            // yolo) arrive as standard `configOptions`, so the composer
-            // selectors need no per-agent code.
+            description: "Google's AI coding agent (agy CLI via ACP)",
+            // Google's first-party `agy_acp_server.par` (ACP registry 1.0.0,
+            // build `agy_acp_server_20260818_01_RC01`) only advertises Gemini
+            // models for `oauth-personal` and rejects Claude/GPT with
+            // "not available for the current authentication method". The `agy`
+            // CLI on the same account lists and runs those models. So codeg
+            // launches the CLI-wrapping ACP adapter (`agy-acp`) instead: it
+            // shells out to `agy`, reports `agy models` over `configOptions`,
+            // and streams the same SQLite trajectories the transcript parser
+            // already reads (`$GEMINI_HOME/antigravity-cli/conversations`).
             //
-            // WHOLE-TREE, NOT SINGLE-FILE. The archive is FLAT but holds TWO
-            // executables:
+            // The adapter is a SINGLE FILE (GitHub release asset, not a zip).
+            // `cmd` is resolvable on PATH (`agy-acp`) so a user-installed copy
+            // is used when nothing is cached. Launch also sets `AGY_BIN` when
+            // `agy` itself is on PATH — see `connection.rs`.
             //
-            //   agy_acp_server.par     the server (a compiled binary despite
-            //                          the `.par` name — it embeds a whole
-            //                          CPython runtime)
-            //   localharness_external  the Go harness the server drives
-            //
-            // `main.py::_configure_localharness_path` looks for
-            // `localharness_external` (then `localharness`) beside
-            // `dirname(argv[0])` / `dirname(sys.executable)` and logs
-            // "Localharness not found." when it is missing. Copying the
-            // single `cmd` file out of the archive (`dir_entry: None`) would
-            // strand that sibling, so this uses the same whole-tree
-            // extraction Cursor does — and `install_extracted_tree` also
-            // marks the harness executable.
-            //
-            // AUTH IS A FILE, NOT AN ENV VAR. `session/new` FAILS with
-            // `-32000 Authentication required` unless
-            // `$GEMINI_HOME/antigravity-acp/settings.json` declares
-            // `auth.type` (env-based selection was removed upstream; the
-            // server's own message says so). codeg does not implement the ACP
-            // `authenticate` request, so the launch path writes that file
-            // instead — see `sync_antigravity_settings_file` in connection.rs
-            // and the Antigravity settings panel that feeds it. With
-            // `auth.type` set, the server runs its own browser OAuth loopback
-            // flow inside `session/new`.
-            //
-            // VERSION vs URL. `version` is the ACP registry's ("1.0.0"); the
-            // URLs carry Google's build id (`agy_acp_server_20260818_01_RC01`)
-            // instead, so the two do NOT substitute into each other — bump
-            // both together. Because the version is not templatable into the
-            // URL, `supports_custom_version()` answers false for this agent and
-            // both the settings page and the download path refuse a custom
-            // version outright, rather than relabelling the cache entry with a
-            // build that was never fetched.
-            // `darwin-x86_64` is deliberately absent: upstream publishes no
-            // Intel macOS build, so those machines get `PlatformNotSupported`
-            // rather than a 404 mid-download.
+            // AUTH. The CLI holds its own Google login under
+            // `antigravity-cli/`. The settings panel still writes
+            // `antigravity-acp/settings.json` for anyone falling back to the
+            // first-party server; the adapter ignores that file.
             distribution: AgentDistribution::Binary {
-                version: "1.0.0",
-                // Never resolvable on PATH (there is no standalone CLI by
-                // this name); it exists because `Binary` requires one, and
-                // for dir-tree agents `installed_binary_path` ignores it in
-                // favour of `dir_entry`.
-                cmd: "agy_acp_server",
-                // `--uid=` is an absl/InitGoogle flag ("If root, switch to
-                // this user id (or empty-string not to switch)"), not an ACP
-                // one: without it a root process (Docker) drops to `nobody`.
-                // The ACP registry passes it on Linux ONLY, and so do we —
-                // the Windows build need not link the same InitGoogle, and an
-                // unknown flag is a hard startup error there.
-                args: ANTIGRAVITY_LAUNCH_ARGS,
+                version: "1.1.0",
+                cmd: "agy-acp",
+                args: &[],
                 env: &[],
                 platforms: &[
                     PlatformBinary {
                         platform: "darwin-aarch64",
-                        url: "https://dl.google.com/agy-extensions/releases/macos/agy-acp-server-agy_acp_server_20260818_01_RC01-darwin-arm64.zip",
+                        url: "https://github.com/shubzkothekar/antigravity-acp/releases/download/v1.1.0/agy-acp-darwin-arm64",
+                        sha256: None,
+                    },
+                    PlatformBinary {
+                        platform: "darwin-x86_64",
+                        url: "https://github.com/shubzkothekar/antigravity-acp/releases/download/v1.1.0/agy-acp-darwin-x64",
                         sha256: None,
                     },
                     PlatformBinary {
                         platform: "linux-aarch64",
-                        url: "https://dl.google.com/agy-extensions/releases/linux/agy-acp-server-agy_acp_server_20260818_01_RC01-linux-arm64.zip",
+                        url: "https://github.com/shubzkothekar/antigravity-acp/releases/download/v1.1.0/agy-acp-linux-arm64",
                         sha256: None,
                     },
                     PlatformBinary {
                         platform: "linux-x86_64",
-                        url: "https://dl.google.com/agy-extensions/releases/linux/agy-acp-server-agy_acp_server_20260818_01_RC01-linux-x86_64.zip",
+                        url: "https://github.com/shubzkothekar/antigravity-acp/releases/download/v1.1.0/agy-acp-linux-x64",
                         sha256: None,
                     },
                     PlatformBinary {
                         platform: "windows-aarch64",
-                        url: "https://dl.google.com/agy-extensions/releases/windows/agy-acp-server-agy_acp_server_20260818_01_RC01-windows-arm64.zip",
+                        url: "https://github.com/shubzkothekar/antigravity-acp/releases/download/v1.1.0/agy-acp-windows-arm64.exe",
                         sha256: None,
                     },
                     PlatformBinary {
                         platform: "windows-x86_64",
-                        url: "https://dl.google.com/agy-extensions/releases/windows/agy-acp-server-agy_acp_server_20260818_01_RC01-windows-x86_64.zip",
+                        url: "https://github.com/shubzkothekar/antigravity-acp/releases/download/v1.1.0/agy-acp-windows-x64.exe",
                         sha256: None,
                     },
                 ],
-                dir_entry: Some(BinaryDirEntry {
-                    unix: "agy_acp_server.par",
-                    windows: "agy_acp_server.exe",
-                    // The Go harness the server execs. Required, not just
-                    // chmod'd: without it the server starts and then logs
-                    // "Localharness not found." — a working handshake
-                    // attached to a broken agent, which is worse than a
-                    // failed install. It also invalidates any single-file
-                    // cache left behind by a pre-integration CUSTOM entry
-                    // for `antigravity-acp` (see `required_siblings`).
-                    required_siblings: PlatformFiles {
-                        unix: &["localharness_external"],
-                        windows: &["localharness_external.exe"],
-                    },
-                }),
+                dir_entry: None,
             },
         },
         // Handled by the early return above; kept so the match stays
@@ -1334,13 +1272,12 @@ mod tests {
         }
     }
 
-    // Google Antigravity's archive is FLAT but holds two executables — the
-    // server and the `localharness_external` binary it spawns — so it must
-    // use whole-tree extraction (the single-file copy-out would strand the
-    // harness and the server would log "Localharness not found."). The Linux
-    // targets, and only those, carry the absl `--uid=` flag.
+    // Google's first-party ACP server is Gemini-only for oauth-personal, so
+    // Antigravity launches the `agy` CLI wrapper (`agy-acp`) as a single-file
+    // binary. Release assets are bare files, not zip archives, and Intel macOS
+    // is published (unlike the first-party par).
     #[test]
-    fn antigravity_pins_dir_tree_binary_and_linux_only_uid_flag() {
+    fn antigravity_pins_cli_adapter_binary() {
         let meta = get_agent_meta(AgentType::Antigravity);
         assert!(meta.supports_mcp);
         assert_eq!(registry_id_for(AgentType::Antigravity), "antigravity-acp");
@@ -1353,40 +1290,29 @@ mod tests {
                 dir_entry,
                 ..
             } => {
-                assert_eq!(version, "1.0.0");
-                assert_eq!(cmd, "agy_acp_server");
-                let entry = dir_entry.expect("antigravity must use dir-tree extraction");
-                assert_eq!(entry.unix, "agy_acp_server.par");
-                assert_eq!(entry.windows, "agy_acp_server.exe");
-                // Five targets: upstream publishes no Intel macOS build.
-                assert_eq!(platforms.len(), 5);
-                assert!(!platforms.iter().any(|p| p.platform == "darwin-x86_64"));
+                assert_eq!(version, "1.1.0");
+                assert_eq!(cmd, "agy-acp");
+                assert!(args.is_empty());
+                assert!(
+                    dir_entry.is_none(),
+                    "agy-acp is a single file, not a dir tree"
+                );
+                assert_eq!(platforms.len(), 6);
+                assert!(platforms.iter().any(|p| p.platform == "darwin-x86_64"));
                 for platform in platforms {
                     assert!(
-                        platform
-                            .url
-                            .contains("agy_acp_server_20260818_01_RC01"),
-                        "{} URL lost the build id: {}",
+                        platform.url.contains("/v1.1.0/agy-acp-"),
+                        "{} URL lost the adapter version: {}",
+                        platform.platform,
+                        platform.url
+                    );
+                    assert!(
+                        !platform.url.ends_with(".zip"),
+                        "{} must be a bare binary, not an archive: {}",
                         platform.platform,
                         platform.url
                     );
                 }
-                if cfg!(target_os = "linux") {
-                    assert_eq!(args, &["--uid="]);
-                } else {
-                    assert!(args.is_empty(), "--uid= is a Linux-only absl flag");
-                }
-                // The harness must be REQUIRED, not merely chmod'd. It is what
-                // stops a stale single-file cache — which a pre-integration
-                // CUSTOM `antigravity-acp` entry would have written under the
-                // same key, because the archive is flat — from being adopted
-                // and launched without it.
-                let required = entry.required_siblings.for_current_platform();
-                assert_eq!(required.len(), 1);
-                assert!(
-                    required[0].starts_with("localharness_external"),
-                    "unexpected required sibling: {required:?}"
-                );
             }
             other => panic!("expected binary distribution for Antigravity, got {other:?}"),
         }
@@ -1404,11 +1330,13 @@ mod tests {
     /// version, which is exactly that inference.
     #[test]
     fn custom_version_install_follows_the_url_not_the_version_field() {
+        // Adapter release URLs embed `v1.1.0`, so a requested version is a
+        // real substitution rather than a cache-label lie.
         assert!(
-            !get_agent_meta(AgentType::Antigravity).supports_custom_version(),
-            "antigravity's URLs carry a build id, so a version cannot be templated in"
+            get_agent_meta(AgentType::Antigravity).supports_custom_version(),
+            "antigravity's agy-acp URLs contain the pinned version"
         );
-        // Cursor is the control: a binary agent whose release path IS its
+        // Cursor is the other binary control: its release path IS its
         // pinned version, so the substitution genuinely selects a build.
         assert!(get_agent_meta(AgentType::Cursor).supports_custom_version());
         // npx installs `<package>@<version>` directly — no URL involved.
@@ -1517,12 +1445,7 @@ mod tests {
             "openclaw@2026.7.1",
             Some("22.22.3"),
         );
-        assert_npx_version(
-            AgentType::Cline,
-            "3.0.60",
-            "cline@3.0.60",
-            Some("22.0.0"),
-        );
+        assert_npx_version(AgentType::Cline, "3.0.60", "cline@3.0.60", Some("22.0.0"));
         assert_npx_version(
             AgentType::CodeBuddy,
             "2.139.0",
@@ -1564,7 +1487,11 @@ mod tests {
             "@qoder-ai/qodercli@1.1.31",
             Some("20.0.0"),
         );
-        assert_binary_version(AgentType::OpenCode, "1.18.23", "/releases/download/v1.18.23/");
+        assert_binary_version(
+            AgentType::OpenCode,
+            "1.18.23",
+            "/releases/download/v1.18.23/",
+        );
         // Hermes rides the community npm bridge (upstream retired its PyPI
         // channel at 0.19.0; see the registry entry). The npm package version
         // tracks the upstream version 1:1, and the pin must stay EXACT — the

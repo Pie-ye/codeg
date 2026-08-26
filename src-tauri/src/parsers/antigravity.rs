@@ -1,5 +1,9 @@
-//! Transcript reader for Google Antigravity's first-party ACP server
-//! (`agy_acp_server`).
+//! Transcript reader for Google Antigravity sessions.
+//!
+//! Trajectories are SQLite files written by the `agy` CLI (and by Google's
+//! first-party `agy_acp_server`). codeg launches the CLI-wrapping ACP adapter,
+//! so production listing prefers `antigravity-cli/conversations` and still
+//! reads leftover first-party `antigravity-acp/conversations` files.
 //!
 //! LAYOUT. Everything hangs off the *Gemini home* — `$GEMINI_HOME` when set and
 //! non-empty, else `~/.gemini`. Unlike Gemini CLI's `GEMINI_CLI_HOME` (which
@@ -142,6 +146,13 @@ pub(crate) fn resolve_antigravity_shared_config_dir() -> PathBuf {
 /// installed twice.
 pub(crate) fn resolve_antigravity_cli_dir() -> PathBuf {
     resolve_gemini_home().join("antigravity-cli")
+}
+
+/// `<home>/antigravity-cli/conversations` — trajectories written by `agy` /
+/// the CLI-wrapping ACP adapter. Same SQLite+protobuf layout as the
+/// first-party ACP server's `antigravity-acp/conversations`.
+pub(crate) fn resolve_antigravity_cli_sessions_dir() -> PathBuf {
+    resolve_antigravity_cli_dir().join(SESSIONS_DIR_NAME)
 }
 
 // ---------------------------------------------------------------------------
@@ -485,29 +496,52 @@ impl ErrorDetails {
 // ---------------------------------------------------------------------------
 
 pub struct AntigravityParser {
-    base_dir: PathBuf,
+    /// Conversation directories, searched in order. Production looks at the
+    /// CLI tree first (Claude/GPT sessions) then the first-party ACP tree.
+    /// Tests pin a single fixture dir via [`Self::with_base_dir`].
+    base_dirs: Vec<PathBuf>,
 }
 
 impl AntigravityParser {
     pub fn new() -> Self {
-        Self {
-            base_dir: resolve_antigravity_sessions_dir(),
+        let cli = resolve_antigravity_cli_sessions_dir();
+        let acp = resolve_antigravity_sessions_dir();
+        let mut base_dirs = Vec::new();
+        if cli != acp {
+            base_dirs.push(cli);
         }
+        base_dirs.push(acp);
+        Self { base_dirs }
     }
 
     /// Construct a parser pointed at an explicit `conversations/` directory
     /// (test fixtures).
     #[cfg(any(test, feature = "test-utils"))]
     pub fn with_base_dir(base_dir: PathBuf) -> Self {
-        Self { base_dir }
+        Self {
+            base_dirs: vec![base_dir],
+        }
+    }
+
+    fn session_dir(&self, conversation_id: &str) -> &Path {
+        for dir in &self.base_dirs {
+            if dir.join(format!("{conversation_id}.db")).is_file() {
+                return dir;
+            }
+        }
+        self.base_dirs
+            .first()
+            .map(PathBuf::as_path)
+            .unwrap_or_else(|| Path::new("."))
     }
 
     fn db_path(&self, conversation_id: &str) -> PathBuf {
-        self.base_dir.join(format!("{conversation_id}.db"))
+        self.session_dir(conversation_id)
+            .join(format!("{conversation_id}.db"))
     }
 
     fn meta_path(&self, conversation_id: &str) -> PathBuf {
-        self.base_dir
+        self.session_dir(conversation_id)
             .join(format!("{conversation_id}.{METADATA_FILE_SUFFIX}"))
     }
 
@@ -546,27 +580,34 @@ impl Default for AntigravityParser {
 impl AgentParser for AntigravityParser {
     fn list_conversations(&self) -> Result<Vec<ConversationSummary>, ParseError> {
         let mut conversations = Vec::new();
-        let Ok(entries) = std::fs::read_dir(&self.base_dir) else {
-            return Ok(conversations);
-        };
-
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if !path.is_file() || path.extension().and_then(|e| e.to_str()) != Some("db") {
-                continue;
-            }
-            let Some(conversation_id) = path.file_stem().map(|s| s.to_string_lossy().into_owned())
-            else {
+        let mut seen = std::collections::HashSet::new();
+        for base_dir in &self.base_dirs {
+            let Ok(entries) = std::fs::read_dir(base_dir) else {
                 continue;
             };
-            let parsed = self.build(&conversation_id);
-            // A session whose DB is still the pre-created empty file (or which
-            // was cleared) has no content to show — matching the other parsers'
-            // "metadata-only is not listed" rule.
-            if parsed.turns.is_empty() {
-                continue;
+
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if !path.is_file() || path.extension().and_then(|e| e.to_str()) != Some("db") {
+                    continue;
+                }
+                let Some(conversation_id) =
+                    path.file_stem().map(|s| s.to_string_lossy().into_owned())
+                else {
+                    continue;
+                };
+                if !seen.insert(conversation_id.clone()) {
+                    continue;
+                }
+                let parsed = self.build(&conversation_id);
+                // A session whose DB is still the pre-created empty file (or which
+                // was cleared) has no content to show — matching the other parsers'
+                // "metadata-only is not listed" rule.
+                if parsed.turns.is_empty() {
+                    continue;
+                }
+                conversations.push(self.summary_from(&conversation_id, &parsed));
             }
-            conversations.push(self.summary_from(&conversation_id, &parsed));
         }
 
         conversations.sort_by_key(|c| std::cmp::Reverse(c.started_at));
@@ -866,7 +907,10 @@ fn project_steps(steps: &[Step]) -> SessionParse {
         if let Some(usage) = step.metadata.as_ref().and_then(|m| m.model_usage.as_ref()) {
             // Per-step usage SUMS into the turn (cost accounting) while the
             // window gauge tracks only the latest step's input side.
-            pending.usage.input_tokens = pending.usage.input_tokens.saturating_add(usage.input_tokens);
+            pending.usage.input_tokens = pending
+                .usage
+                .input_tokens
+                .saturating_add(usage.input_tokens);
             pending.usage.output_tokens = pending
                 .usage
                 .output_tokens
@@ -1205,7 +1249,10 @@ fn step_outcome(step: &Step) -> Option<StepOutcome> {
         }
         let mut body = String::new();
         if !grep.query.is_empty() {
-            body.push_str(&format!("{} ({} results)\n", grep.query, grep.total_results));
+            body.push_str(&format!(
+                "{} ({} results)\n",
+                grep.query, grep.total_results
+            ));
         }
         body.push_str(&grep.raw_output);
         return Some(StepOutcome {
@@ -1761,10 +1808,7 @@ mod tests {
             conversation_history: "ignored too".into(),
         };
         let decoded = Step::decode(wide.encode_to_vec().as_slice()).expect("decode subset");
-        assert_eq!(
-            decoded.user_input.as_ref().unwrap().query,
-            "still readable"
-        );
+        assert_eq!(decoded.user_input.as_ref().unwrap().query, "still readable");
         assert!(decoded.metadata.unwrap().created_at.is_some());
     }
 
@@ -1859,7 +1903,10 @@ mod tests {
         let parsed: serde_json::Value =
             serde_json::from_str(&truncate_str(&input, TOOL_INPUT_CAP)).expect("still valid JSON");
         assert_eq!(parsed["arguments"]["prompt"].as_str(), Some(&*long_prompt));
-        assert!(parsed.get("prompt").is_none(), "the derived copy is dropped");
+        assert!(
+            parsed.get("prompt").is_none(),
+            "the derived copy is dropped"
+        );
     }
 
     #[test]
@@ -1977,7 +2024,10 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            step_outcome(&genuine).expect("an outcome").output.as_deref(),
+            step_outcome(&genuine)
+                .expect("an outcome")
+                .output
+                .as_deref(),
             Some("from the impostor")
         );
     }

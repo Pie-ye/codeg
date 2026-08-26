@@ -1647,6 +1647,21 @@ async fn build_agent(
                 // sync at save time; here it is already in the log and must
                 // never block a launch, so it is deliberately dropped.
                 let _ = sync_antigravity_settings_file(runtime_env);
+                // `agy-acp` shells out to the `agy` CLI. Point it at a
+                // resolved binary when the user (or an install script) put
+                // `agy` on PATH / `~/.local/bin`, so a GUI-spawned codeg
+                // that inherited a thin PATH still finds it.
+                if !merged_env.iter().any(|(k, v)| k == "AGY_BIN" && !v.trim().is_empty())
+                {
+                    if let Some(agy) = crate::commands::acp::resolve_system_agent_binary("agy")
+                    {
+                        merged_env.retain(|(k, _)| k != "AGY_BIN");
+                        merged_env.push((
+                            "AGY_BIN".to_string(),
+                            agy.to_string_lossy().into_owned(),
+                        ));
+                    }
+                }
             }
             let env_key_list: Vec<&str> = merged_env.iter().map(|(k, _)| k.as_str()).collect();
             if !merged_env.is_empty() {

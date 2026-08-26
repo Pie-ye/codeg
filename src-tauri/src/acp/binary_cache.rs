@@ -516,6 +516,20 @@ fn verify_archive_sha256(path: &std::path::Path, expected: Option<&str>) -> Resu
     )))
 }
 
+
+/// True when `url` names a packed archive codeg knows how to unpack.
+/// Query strings are stripped so a signed URL still matches the extension.
+/// Anything else is treated as the launchable itself (Antigravity's `agy-acp`
+/// GitHub release assets are bare binaries, not zip files).
+fn is_packed_archive_url(url: &str) -> bool {
+    let path = url.split('?').next().unwrap_or(url);
+    path.ends_with(".tar.gz")
+        || path.ends_with(".tgz")
+        || path.ends_with(".tar.bz2")
+        || path.ends_with(".tbz2")
+        || path.ends_with(".zip")
+}
+
 async fn ensure_binary_with_progress(
     agent_id: &str,
     version: &str,
@@ -562,28 +576,30 @@ async fn ensure_binary_with_progress(
         std::fs::create_dir_all(&extract_dir)
             .map_err(|e| AcpError::DownloadFailed(format!("failed to create extract dir: {e}")))?;
 
-        on_progress("Extracting archive...");
-        if archive_url.ends_with(".tar.gz") || archive_url.ends_with(".tgz") {
-            extract_tar_gz(&archive_path, &extract_dir)?;
-        } else if archive_url.ends_with(".tar.bz2") || archive_url.ends_with(".tbz2") {
-            extract_tar_bz2(&archive_path, &extract_dir)?;
-        } else if archive_url.ends_with(".zip") {
-            extract_zip(&archive_path, &extract_dir)?;
+        let extracted_bin = if is_packed_archive_url(archive_url) {
+            on_progress("Extracting archive...");
+            if archive_url.ends_with(".tar.gz") || archive_url.ends_with(".tgz") {
+                extract_tar_gz(&archive_path, &extract_dir)?;
+            } else if archive_url.ends_with(".tar.bz2") || archive_url.ends_with(".tbz2") {
+                extract_tar_bz2(&archive_path, &extract_dir)?;
+            } else {
+                extract_zip(&archive_path, &extract_dir)?;
+            }
+
+            if let Some(entry) = dir_entry_for_agent_id(agent_id) {
+                return install_extracted_tree(&extract_dir, &dir, entry, &on_progress);
+            }
+
+            on_progress("Locating binary...");
+            find_binary_recursive(&extract_dir, &bin_name).ok_or_else(|| {
+                AcpError::DownloadFailed(format!("binary '{bin_name}' not found in archive"))
+            })?
         } else {
-            return Err(AcpError::DownloadFailed(format!(
-                "unsupported archive format: {archive_url}"
-            )));
-        }
-
-        if let Some(entry) = dir_entry_for_agent_id(agent_id) {
-            return install_extracted_tree(&extract_dir, &dir, entry, &on_progress);
-        }
-
-        // Find the binary in extracted files and move to final location.
-        on_progress("Locating binary...");
-        let extracted_bin = find_binary_recursive(&extract_dir, &bin_name).ok_or_else(|| {
-            AcpError::DownloadFailed(format!("binary '{bin_name}' not found in archive"))
-        })?;
+            // GitHub release assets (and similar) are the launchable itself,
+            // not a zip/tar wrapping it. Copy the download as `cmd`.
+            on_progress("Installing binary...");
+            archive_path
+        };
 
         let final_path = dir.join(&bin_name);
         std::fs::copy(&extracted_bin, &final_path)
@@ -1059,6 +1075,20 @@ mod tests {
         };
         let err = install_extracted_tree(&extract, &final_dir, entry, &|_| {}).unwrap_err();
         assert!(err.to_string().contains("not found in archive"), "{err}");
+    }
+
+    #[test]
+    fn packed_archive_url_ignores_query_and_rejects_bare_binaries() {
+        assert!(is_packed_archive_url("https://example/a.zip"));
+        assert!(is_packed_archive_url("https://example/a.tar.gz"));
+        assert!(is_packed_archive_url("https://example/a.tgz?sig=1"));
+        assert!(is_packed_archive_url("https://example/a.tar.bz2"));
+        assert!(!is_packed_archive_url(
+            "https://github.com/shubzkothekar/antigravity-acp/releases/download/v1.1.0/agy-acp-linux-x64"
+        ));
+        assert!(!is_packed_archive_url(
+            "https://github.com/x/y/releases/download/v1/agy-acp-windows-x64.exe"
+        ));
     }
 
     #[test]
