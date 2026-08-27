@@ -492,9 +492,7 @@ export function SystemNetworkSettings() {
                   <Button
                     size="sm"
                     onClick={() =>
-                      openUrl(
-                        "https://github.com/Pie-ye/codeg/releases/latest"
-                      )
+                      openUrl("https://github.com/Pie-ye/codeg/releases/latest")
                     }
                   >
                     <ArrowUpCircle className="h-3.5 w-3.5" />
