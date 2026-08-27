@@ -25,9 +25,11 @@ import { Streamdown, defaultRemarkPlugins } from "streamdown"
 
 import { Shimmer } from "./shimmer"
 import { markdownLinkComponents } from "./markdown-link"
+import { mermaidComponents } from "./mermaid-block"
 import { normalizeMathDelimiters } from "./message"
 import { remarkTrimCjkAutolinkTail } from "./remark-cjk-autolink-tail"
 import { remarkRewriteFileUriLinks } from "./remark-file-uri-links"
+import { remarkRestoreWindowsPaths } from "./remark-windows-paths"
 import { useStreamdownPlugins } from "./streamdown-plugins"
 
 interface ReasoningContextValue {
@@ -229,9 +231,13 @@ export type ReasoningContentProps = ComponentProps<
 
 const remarkPlugins = [
   ...Object.values(defaultRemarkPlugins),
+  // Before remarkRewriteFileUriLinks, which reshapes a drive path's url.
+  remarkRestoreWindowsPaths,
   remarkRewriteFileUriLinks,
   remarkTrimCjkAutolinkTail,
 ]
+
+const reasoningComponents = { ...markdownLinkComponents, ...mermaidComponents }
 
 export const ReasoningContent = memo(
   ({ className, children, ...props }: ReasoningContentProps) => {
@@ -255,7 +261,7 @@ export const ReasoningContent = memo(
           remarkPlugins={remarkPlugins}
           {...props}
           // Enforce the link icon + safety override after spreading props.
-          components={markdownLinkComponents}
+          components={reasoningComponents}
         >
           {normalized}
         </Streamdown>

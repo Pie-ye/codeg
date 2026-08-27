@@ -1092,4 +1092,251 @@ describe("SidebarConversationList — Recent section", () => {
       Array.from(document.querySelectorAll("[data-conversation-id]"))
     ).toHaveLength(2)
   })
+
+  describe("paging", () => {
+    // `recentLimit` starts at RECENT_PAGE_SIZE and only ever grew, so a list
+    // expanded a few pages deep stayed that way for the rest of the session.
+    // These cover the way back out.
+    const PAGE = 15
+    const TOTAL = PAGE + 4
+
+    // Recent duplicates every canonical row, so total cards = canonical + recent
+    // slice. Counting the Recent slice alone keeps the assertions readable.
+    const recentRowCount = () =>
+      Array.from(document.querySelectorAll("[data-conversation-id]")).length -
+      TOTAL
+
+    const buttonWithText = (text: string) =>
+      Array.from(document.querySelectorAll("button")).find((b) =>
+        b.textContent?.includes(text)
+      )
+    const resetButton = () =>
+      Array.from(document.querySelectorAll("button")).find(
+        (b) => b.getAttribute("aria-label") === resetLabel
+      )
+
+    const showMoreLabel = (count: number) =>
+      enMessages.Folder.sidebar.showMoreRecent.replace("{count}", String(count))
+    const resetLabel = enMessages.Folder.sidebar.resetRecentLimit.replace(
+      "{count}",
+      String(PAGE)
+    )
+
+    beforeEach(() => {
+      // The collapse test above persists `{recent: true}` into
+      // `workspace:sidebar-section-collapsed`, and the list hydrates from it —
+      // leave it and this whole section renders collapsed (zero rows).
+      localStorage.clear()
+      const folders = [folder(1, "Repo")]
+      useAppWorkspaceStore.setState({
+        folders,
+        allFolders: folders,
+        conversations: Array.from({ length: TOTAL }, (_, i) => conv(i + 1, 1)),
+      })
+    })
+
+    it("folds a multi-page list back to the first page", () => {
+      render(recentTree(true))
+      expect(recentRowCount()).toBe(PAGE)
+      // No reset on an untouched first page — there is nothing to fold back.
+      expect(resetButton()).toBeUndefined()
+
+      act(() => {
+        fireEvent.click(buttonWithText(showMoreLabel(TOTAL - PAGE))!)
+      })
+      expect(recentRowCount()).toBe(TOTAL)
+
+      // Everything is out, so the footer survives as a reset-only row: the
+      // "show more" label is gone but the row itself is still the way back.
+      expect(buttonWithText(showMoreLabel(0))).toBeUndefined()
+      act(() => {
+        fireEvent.click(buttonWithText(resetLabel)!)
+      })
+      expect(recentRowCount()).toBe(PAGE)
+    })
+
+    it("offers the reset at the row's right edge while pages remain", () => {
+      // 3 pages' worth, so one "show more" click still leaves a remainder and
+      // the footer keeps both affordances at once.
+      const conversations = Array.from({ length: PAGE * 3 }, (_, i) =>
+        conv(i + 1, 1)
+      )
+      useAppWorkspaceStore.setState({ conversations })
+      render(recentTree(true))
+
+      act(() => {
+        fireEvent.click(buttonWithText(showMoreLabel(PAGE * 2))!)
+      })
+      const recentRows = () =>
+        Array.from(document.querySelectorAll("[data-conversation-id]")).length -
+        conversations.length
+      expect(recentRows()).toBe(PAGE * 2)
+      // Still more to reveal…
+      expect(buttonWithText(showMoreLabel(PAGE))).toBeDefined()
+      // …and the icon-only reset is a SIBLING of the row button, not nested
+      // (buttons cannot nest) — so it is reachable on its own.
+      const reset = resetButton()
+      expect(reset).toBeDefined()
+      expect(reset!.querySelector("button")).toBeNull()
+
+      act(() => {
+        fireEvent.click(reset!)
+      })
+      expect(recentRows()).toBe(PAGE)
+    })
+
+    it("keeps keyboard focus on the footer through a reset", () => {
+      // The icon reset unmounts itself on activation, so without an explicit
+      // hand-off focus falls to <body> — a keyboard user lands back at the top
+      // of the document. Covers both variants: the icon (which disappears) and
+      // the reset-only row (whose button survives as "show more").
+      useAppWorkspaceStore.setState({
+        conversations: Array.from({ length: PAGE * 3 }, (_, i) =>
+          conv(i + 1, 1)
+        ),
+      })
+      render(recentTree(true))
+      act(() => {
+        fireEvent.click(buttonWithText(showMoreLabel(PAGE * 2))!)
+      })
+
+      const icon = resetButton()!
+      act(() => {
+        icon.focus()
+        fireEvent.click(icon)
+      })
+      expect(document.activeElement).not.toBe(document.body)
+      const footer = buttonWithText(showMoreLabel(PAGE * 2))!
+      expect(document.activeElement).toBe(footer)
+
+      // Now the reset-only variant: reveal everything, then reset from the row.
+      act(() => {
+        fireEvent.click(buttonWithText(showMoreLabel(PAGE * 2))!)
+      })
+      act(() => {
+        fireEvent.click(buttonWithText(showMoreLabel(PAGE))!)
+      })
+      const rowReset = buttonWithText(resetLabel)!
+      act(() => {
+        rowReset.focus()
+        fireEvent.click(rowReset)
+      })
+      expect(document.activeElement).not.toBe(document.body)
+      expect(document.activeElement).toBe(
+        buttonWithText(showMoreLabel(PAGE * 2))
+      )
+    })
+  })
+})
+
+describe("SidebarConversationList — expand / collapse all", () => {
+  const SECTION_COLLAPSED_KEY = "workspace:sidebar-section-collapsed"
+  const FOLDER_EXPANDED_KEY = "workspace:sidebar-folder-expanded"
+  const { sectionPinned, sectionFolders, sectionChats, sectionRecent } =
+    enMessages.Folder.sidebar
+  const ALL_SECTIONS = [
+    sectionPinned,
+    sectionFolders,
+    sectionChats,
+    sectionRecent,
+  ]
+
+  // The section header's toggle carries the state under test; its textContent is
+  // exactly the label (the chevron is an svg).
+  const sectionHeader = (label: string) =>
+    Array.from(document.querySelectorAll("button")).find(
+      (b) => b.textContent === label
+    )
+  const expandedOf = (label: string) =>
+    sectionHeader(label)?.getAttribute("aria-expanded")
+
+  function renderList() {
+    const ref = createRef<SidebarConversationListHandle>()
+    render(
+      <NextIntlClientProvider locale="en" messages={enMessages}>
+        <SidebarConversationList
+          showCompleted
+          showRecent
+          sortMode="created"
+          ref={ref}
+        />
+      </NextIntlClientProvider>
+    )
+    return ref
+  }
+
+  beforeEach(() => {
+    localStorage.removeItem(SECTION_COLLAPSED_KEY)
+    localStorage.removeItem(FOLDER_EXPANDED_KEY)
+    const folders = [folder(1, "Repo")]
+    store.activeTabId = null
+    store.tabSpec = []
+    useAppWorkspaceStore.setState({
+      folders,
+      allFolders: folders,
+      conversations: [
+        // conv-11 is folder-bound (Folders + Recent), conv-12 is folderless
+        // chat mode (Chat + Recent only), conv-14 is pinned (Pinned only).
+        conv(11, 1),
+        conv(12, 99, { kind: "chat" }),
+        conv(14, 1, { pinned_at: new Date(FIXED).toISOString() }),
+      ],
+    })
+  })
+
+  afterEach(() => {
+    localStorage.removeItem(SECTION_COLLAPSED_KEY)
+    localStorage.removeItem(FOLDER_EXPANDED_KEY)
+  })
+
+  it("closes all four section headers, not just the folder groups", () => {
+    const ref = renderList()
+    for (const label of ALL_SECTIONS) expect(expandedOf(label)).toBe("true")
+
+    act(() => ref.current?.collapseAll())
+
+    for (const label of ALL_SECTIONS) expect(expandedOf(label)).toBe("false")
+    // Not just the header state — every row is actually gone. The three
+    // conversations cover the three ways a row can reach the list: conv-11 via
+    // a folder group, conv-12 (folderless chat mode) via Chat + Recent, conv-14
+    // via Pinned. What is left is four headers and nothing under them.
+    for (const title of ["conv-11", "conv-12", "conv-14"])
+      expect(document.body.textContent).not.toContain(title)
+    expect(document.querySelectorAll("[data-conversation-id]")).toHaveLength(0)
+    expect(
+      JSON.parse(localStorage.getItem(SECTION_COLLAPSED_KEY) ?? "{}")
+    ).toMatchObject({ pinned: true, folders: true, chats: true, recent: true })
+  })
+
+  it("re-opens every section AND the folder groups under them on expandAll", () => {
+    const ref = renderList()
+    act(() => ref.current?.collapseAll())
+    act(() => ref.current?.expandAll())
+
+    for (const label of ALL_SECTIONS) expect(expandedOf(label)).toBe("true")
+    // Section collapse and per-folder collapse are stored separately, so
+    // re-opening "Folders" is not enough on its own — conv-11 is only back if
+    // its folder group was restored too.
+    for (const title of ["conv-11", "conv-12", "conv-14"])
+      expect(document.body.textContent).toContain(title)
+    expect(
+      JSON.parse(localStorage.getItem(SECTION_COLLAPSED_KEY) ?? "{}")
+    ).toMatchObject({
+      pinned: false,
+      folders: false,
+      chats: false,
+      recent: false,
+    })
+  })
+
+  it("is idempotent — a second collapseAll writes nothing new", () => {
+    const ref = renderList()
+    act(() => ref.current?.collapseAll())
+    const afterFirst = localStorage.getItem(SECTION_COLLAPSED_KEY)
+
+    act(() => ref.current?.collapseAll())
+
+    expect(localStorage.getItem(SECTION_COLLAPSED_KEY)).toBe(afterFirst)
+    for (const label of ALL_SECTIONS) expect(expandedOf(label)).toBe("false")
+  })
 })

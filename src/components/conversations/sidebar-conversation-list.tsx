@@ -20,6 +20,7 @@ import {
   Check,
   ChevronDown,
   ChevronRight,
+  ChevronsUp,
   Download,
   ExternalLink,
   FolderClosed,
@@ -30,9 +31,11 @@ import {
   Link2,
   ListChecks,
   Loader2,
+  MonitorCloud,
   MoreHorizontal,
   Palette,
   Rocket,
+  Settings,
   SquarePen,
   Tag,
   XCircle,
@@ -73,6 +76,7 @@ import {
   loadConversationExpanded,
   saveConversationExpanded,
   DEFAULT_SECTION_ORDER,
+  SIDEBAR_SECTION_KEYS,
   type SidebarSectionCollapsed,
   type SidebarSectionKey,
   type SidebarSortMode,
@@ -104,6 +108,7 @@ import {
   mergeChildrenById,
   nextHeaderAfter,
   pointerYToTargetIndex,
+  RECENT_PAGE_SIZE,
   reuseSelected,
   reuseSet,
   selectChatConversationsWithReuse,
@@ -113,10 +118,12 @@ import {
   worktreeHeaderAlias,
   type SidebarRow,
 } from "./sidebar-conversation-grouping"
+import { useRemoteWorkspaceConnections } from "@/hooks/use-remote-workspace-connections"
 import { useSubsessionSync } from "@/hooks/use-subsession-sync"
 import { SidebarSectionHeader } from "./sidebar-section-header"
 import { ConversationManageDialog } from "./conversation-manage-dialog"
 import { CloneDialog } from "@/components/layout/clone-dialog"
+import { RemoteWorkspaceManageDialog } from "@/components/layout/remote-workspace-manage-dialog"
 import { WorkspaceFolderDialog } from "@/components/layout/workspace-folder-dialog"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -169,12 +176,6 @@ const EMPTY_CHILD_TO_PARENT: ReadonlyMap<number, number> = new Map()
 // `containerChildren` memo (and buildRows through it) doesn't churn.
 const EMPTY_CONTAINER_CHILDREN: ReadonlyMap<number, readonly number[]> =
   new Map()
-
-// How many conversations the "Recent" section shows before its "show more" row,
-// and how many each click adds. Recent deliberately re-lists what the Folders /
-// Chat sections already show, so an unbounded one pushes every section below it
-// off the screen — a page keeps it a glance-able "where was I" list.
-const RECENT_PAGE_SIZE = 15
 
 const FolderHeader = memo(function FolderHeader({
   folderId,
@@ -719,6 +720,20 @@ const FolderHeader = memo(function FolderHeader({
 
 export interface SidebarConversationListHandle {
   scrollToActive: () => void
+  /**
+   * Open / close every collapsible group in the list at once, driven by the
+   * sidebar header's toggle. "Every" is literal: the folder groups (plus each
+   * container's worktree children and its root sub-group) AND all four
+   * top-level section headers — Pinned, Folders, Chat, Recent. Any header left
+   * standing open is what makes the button read as broken, and the flat
+   * sections in particular own conversation rows directly, with no folder in
+   * between, so nothing else would have closed them.
+   *
+   * Collapsed therefore bottoms out at four header rows and nothing else. That
+   * is the intent, not an overshoot — `expandAll` restores the folder groups
+   * underneath, since section collapse and per-folder collapse are stored
+   * separately and neither erases the other.
+   */
   expandAll: () => void
   collapseAll: () => void
 }
@@ -750,6 +765,7 @@ export function SidebarConversationList({
   const tCommon = useTranslations("Folder.common")
   const tFolderDropdown = useTranslations("Folder.folderNameDropdown")
   const tFileTree = useTranslations("Folder.fileTreeTab")
+  const tRemote = useTranslations("RemoteWorkspace")
   const { resolvedTheme } = useTheme()
   const { themeColor: appThemeColor } = useThemeColor()
   const { createTerminalInDirectory } = useTerminalContext()
@@ -867,6 +883,23 @@ export function SidebarConversationList({
     () => setRecentLimit((n) => n + RECENT_PAGE_SIZE),
     []
   )
+  // The Recent footer's own button, so the reset can hand focus to it.
+  const recentMoreButtonRef = useRef<HTMLButtonElement>(null)
+  // The way back out. `recentLimit` only ever grew before, so a list expanded a
+  // few pages deep stayed that way for the rest of the session, pushing the
+  // sections under Recent off the screen.
+  const resetRecentLimit = useCallback(() => {
+    // Move focus FIRST, while the right-edge icon variant is still mounted:
+    // dropping the limit unmounts it (its `canReset` goes false) and would
+    // otherwise leave keyboard focus on <body>, i.e. back at the top of the
+    // document. The footer button always survives a reset — the reset only
+    // exists when more than a page is on screen, so a remainder is guaranteed —
+    // and in the reset-only variant it IS the clicked button, making this a
+    // no-op. Programmatic focus after a mouse click does not raise
+    // `:focus-visible`, so pointer users see no ring.
+    recentMoreButtonRef.current?.focus()
+    setRecentLimit(RECENT_PAGE_SIZE)
+  }, [])
   // ── Per-conversation delegation sub-session expansion ───────────────────
   // Default COLLAPSED (unlike folders): only ids the user opened are tracked
   // and persisted. Hydrated from localStorage after mount. `childrenByParent`
@@ -908,6 +941,16 @@ export function SidebarConversationList({
   const [manageFolderId, setManageFolderId] = useState<number | null>(null)
   const [cloneOpen, setCloneOpen] = useState(false)
   const [browserOpen, setBrowserOpen] = useState(false)
+  const [remoteManageOpen, setRemoteManageOpen] = useState(false)
+  // Backs the list context menu's "Open remote workspace" submenu. Shared with
+  // the status bar's quick-actions menu, which renders the same list from the
+  // same loader; connections are fetched when that submenu opens, not on mount.
+  const {
+    desktop: remoteAvailable,
+    connections: remoteConnections,
+    refresh: refreshRemote,
+    open: openRemote,
+  } = useRemoteWorkspaceConnections()
   // Folder whose links are being managed (context menu -> Linked folders).
   const [linksFolder, setLinksFolder] = useState<FolderDetail | null>(null)
   const [dragging, setDragging] = useState<number | null>(null)
@@ -957,6 +1000,20 @@ export function SidebarConversationList({
   const toggleSection = useCallback((section: SidebarSectionKey) => {
     setSectionCollapsed((prev) => {
       const next = { ...prev, [section]: !prev[section] }
+      saveSectionCollapsed(next)
+      return next
+    })
+  }, [])
+
+  /** Drive every top-level section header at once, for expand/collapse-all.
+   *  Bails out (same object → no re-render, no write) when they already all
+   *  agree, so the header button is idempotent. */
+  const setAllSectionsCollapsed = useCallback((collapsed: boolean) => {
+    setSectionCollapsed((prev) => {
+      if (SIDEBAR_SECTION_KEYS.every((key) => Boolean(prev[key]) === collapsed))
+        return prev
+      const next: SidebarSectionCollapsed = { ...prev }
+      for (const key of SIDEBAR_SECTION_KEYS) next[key] = collapsed
       saveSectionCollapsed(next)
       return next
     })
@@ -1337,6 +1394,7 @@ export function SidebarConversationList({
       })
       // Expand every container's root sub-group too (session-only state).
       setRootGroupCollapsed((prev) => (prev.size === 0 ? prev : new Set()))
+      setAllSectionsCollapsed(false)
     },
     collapseAll() {
       setFolderExpanded((prev) => {
@@ -1347,6 +1405,7 @@ export function SidebarConversationList({
         saveFolderExpanded(next)
         return next
       })
+      setAllSectionsCollapsed(true)
     },
   }))
 
@@ -2367,12 +2426,33 @@ export function SidebarConversationList({
       // box, centred on the var), and the label starts at the card's title
       // inset (`axis + 0.875rem`). Same row height and full rounding too, so
       // its hover pill is the one the rows above it use.
+      //
+      // Two directions live here. While pages remain, the row is "show more"
+      // and the reset hides at the right edge as an icon, on the same
+      // reveal-on-hover terms as the section headers' actions. Once the last
+      // page is out (`remaining === 0`) buildRows keeps the row alive for the
+      // reset alone, and it takes over the row: nothing is left to expand, so a
+      // hover-only affordance would be the section's only exit hiding itself.
+      const showMore = row.remaining > 0
+      const resetLabel = t("resetRecentLimit", { count: RECENT_PAGE_SIZE })
       return (
-        <div className="relative h-[2rem]">
+        <div className="group/recent-more relative h-[2rem]">
           <button
+            ref={recentMoreButtonRef}
             type="button"
-            onClick={revealMoreRecent}
-            className="relative flex h-[1.9375rem] w-full items-center rounded-full pr-[0.25rem] text-left text-[0.75rem] text-muted-foreground/80 outline-none transition-colors duration-[120ms] hover:bg-[color-mix(in_oklab,var(--sidebar-accent),var(--sidebar-foreground)_2%)] hover:text-sidebar-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset"
+            onClick={showMore ? revealMoreRecent : resetRecentLimit}
+            className={cn(
+              // Lit from the ROW (`group-hover`), not from this button's own
+              // `:hover`. The reset icon is a sibling stacked on top, so with a
+              // plain `hover:` the pill went out the moment the pointer crossed
+              // onto it — the row read as un-hovered while the cursor was still
+              // inside it. Same reason the section headers put their group on
+              // the row container rather than the toggle button.
+              "relative flex h-[1.9375rem] w-full items-center rounded-full text-left text-[0.75rem] text-muted-foreground/80 outline-none transition-colors duration-[120ms] group-hover/recent-more:bg-[color-mix(in_oklab,var(--sidebar-accent),var(--sidebar-foreground)_2%)] group-hover/recent-more:text-sidebar-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset",
+              // Reserved unconditionally (not just while hovered) so revealing
+              // the reset icon never reflows the label under the cursor.
+              showMore && row.canReset ? "pr-[1.75rem]" : "pr-[0.25rem]"
+            )}
             style={{
               paddingLeft: "calc(var(--conv-rail-axis, 0.875rem) + 0.875rem)",
             }}
@@ -2387,12 +2467,36 @@ export function SidebarConversationList({
                 transform: "translate(-50%, -50%)",
               }}
             >
-              <ChevronDown className="h-[0.75rem] w-[0.75rem]" />
+              {showMore ? (
+                <ChevronDown className="h-[0.75rem] w-[0.75rem]" />
+              ) : (
+                <ChevronsUp className="h-[0.75rem] w-[0.75rem]" />
+              )}
             </span>
             <span className="truncate">
-              {t("showMoreRecent", { count: row.remaining })}
+              {showMore
+                ? t("showMoreRecent", { count: row.remaining })
+                : resetLabel}
             </span>
           </button>
+          {showMore && row.canReset && (
+            // A SIBLING of the row button, never a child: buttons cannot nest.
+            // Being a sibling is also why the row's pill has to be driven from
+            // the group above — `:hover` only walks ancestors, and this button
+            // is not one, so the pill would blink off under the cursor.
+            // Geometry copied from the section headers' right-edge actions
+            // (`sidebar-section-header.tsx`) so every right-edge affordance in
+            // the sidebar lands on the same axis and reads as one family.
+            <button
+              type="button"
+              onClick={resetRecentLimit}
+              title={resetLabel}
+              aria-label={resetLabel}
+              className="absolute top-1/2 right-[0.375rem] flex h-6 w-6 -translate-y-1/2 cursor-pointer items-center justify-end rounded-[0.375rem] text-muted-foreground/90 opacity-0 outline-none transition-[color,opacity] duration-150 group-hover/recent-more:opacity-100 hover:text-sidebar-foreground focus-visible:opacity-100 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset [@media(hover:none)]:opacity-100"
+            >
+              <ChevronsUp className="h-[0.875rem] w-[0.875rem]" />
+            </button>
+          )}
         </div>
       )
     }
@@ -2649,6 +2753,59 @@ export function SidebarConversationList({
               <Download className="h-4 w-4" />
               {t("importLocalSessions")}
             </ContextMenuItem>
+            {/* Trailing entry, desktop-only: opening a remote workspace spawns
+                another window bound to a different server, which a web client
+                can't do. This is where the picker moved to when the fixed
+                top-left chrome handed its slot to Search — the status bar's
+                quick-actions menu carries the same submenu. Its own group: the
+                rows above all act on THIS machine's workspace, while this one
+                leaves for another host. The rule lives inside the guard so web
+                builds don't render a divider with nothing under it. */}
+            {remoteAvailable && (
+              <>
+                <ContextMenuSeparator />
+                <ContextMenuSub
+                  onOpenChange={(open) => open && void refreshRemote()}
+                >
+                  <ContextMenuSubTrigger>
+                    <MonitorCloud className="h-4 w-4" />
+                    {tRemote("openRemoteWorkspace")}
+                  </ContextMenuSubTrigger>
+                  {/* The shared sub-content is `overflow-hidden` with no height
+                      cap, so a long connection list would strand its tail — the
+                      manage row included — offscreen. Bound and scroll it. */}
+                  <ContextMenuSubContent className="max-h-(--radix-context-menu-content-available-height) w-72 overflow-x-hidden overflow-y-auto">
+                    {remoteConnections.length === 0 ? (
+                      <div className="px-3 py-2 text-sm text-muted-foreground">
+                        {tRemote("empty")}
+                      </div>
+                    ) : (
+                      remoteConnections.map((connection) => (
+                        <ContextMenuItem
+                          key={connection.id}
+                          onSelect={() => openRemote(connection.id)}
+                        >
+                          <MonitorCloud className="h-4 w-4" />
+                          <span className="min-w-0">
+                            <span className="block truncate">
+                              {connection.name}
+                            </span>
+                            <span className="block truncate text-xs text-muted-foreground">
+                              {connection.base_url}
+                            </span>
+                          </span>
+                        </ContextMenuItem>
+                      ))
+                    )}
+                    <ContextMenuSeparator />
+                    <ContextMenuItem onSelect={() => setRemoteManageOpen(true)}>
+                      <Settings className="h-4 w-4" />
+                      {tRemote("manage")}
+                    </ContextMenuItem>
+                  </ContextMenuSubContent>
+                </ContextMenuSub>
+              </>
+            )}
           </ContextMenuContent>
         </ContextMenu>
       )}
@@ -2685,6 +2842,17 @@ export function SidebarConversationList({
 
       <CloneDialog open={cloneOpen} onOpenChange={setCloneOpen} />
       <WorkspaceFolderDialog open={browserOpen} onOpenChange={setBrowserOpen} />
+      {/* Sibling of the context menu, never a child of it: the menu unmounts
+          its content on close, which would take a nested dialog with it. Mounted
+          only where its submenu exists, so web builds don't carry a dialog
+          nothing can open. */}
+      {remoteAvailable && (
+        <RemoteWorkspaceManageDialog
+          open={remoteManageOpen}
+          onOpenChange={setRemoteManageOpen}
+          onChanged={refreshRemote}
+        />
+      )}
       {linksFolder && (
         <WorkspaceFolderDialog
           open
