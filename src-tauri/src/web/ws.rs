@@ -130,6 +130,16 @@ async fn handle_ws_connection(
     // lines. Task-local: one instance per WS connection.
     let mut lag_throttle = LagLogThrottle::new(LAG_LOG_WINDOW);
 
+    // WebSocket keepalive (RFC 6455 unidirectional heartbeat). Browsers
+    // auto-answer Ping with Pong, which keeps the connection active across
+    // Cloudflare's ~100 s WS idle timeout (and similar reverse proxies) when
+    // the web UI is idle behind a tunnel — otherwise the UI shows a spurious
+    // "disconnected" banner while the server session stays alive. 30 s leaves
+    // ample headroom under the 100 s ceiling.
+    let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(30));
+    heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    heartbeat.tick().await; // consume the immediate first tick
+
     loop {
         tokio::select! {
             // Server-initiated shutdown: notify any active attach
@@ -239,6 +249,15 @@ async fn handle_ws_connection(
                         // Binary / ping / pong: ignore.
                     }
                     _ => break,
+                }
+            }
+
+            // Keepalive ping (see heartbeat setup above). The browser
+            // answers with Pong automatically; a send failure means the
+            // socket is dead, so bail out like the other send errors.
+            _ = heartbeat.tick() => {
+                if socket.send(Message::Ping(Default::default())).await.is_err() {
+                    break;
                 }
             }
         }
